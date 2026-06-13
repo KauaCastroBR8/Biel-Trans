@@ -10,6 +10,7 @@ Como usar:
 
 import streamlit as st
 import re
+import html as html_lib
 import time
 import subprocess
 from pathlib import Path
@@ -38,6 +39,7 @@ COLOR_CONCORD = "#c8e6c9"
 COLOR_OCR = "#ffe0b2"
 COLOR_HIFEN = "#b2dfdb"
 COLOR_ESTILO = "#e1bee7"
+LETRA_UNICODE = r"[^\W\d_]"
 
 @dataclass
 class Correcao:
@@ -166,9 +168,10 @@ def aplicar_regras_mecanicas(texto):
         depois = match.group(2)
         return antes + "-" + depois.lower()
 
-    novo_texto = re.sub(r"([a-zA-Z]+)[\u2014-]([a-zA-Z]+)", corr_hifen_meio, texto_corrigido)
+    padrao_hifen_meio = rf"({LETRA_UNICODE}+)[\u2014-]({LETRA_UNICODE}+)"
+    novo_texto = re.sub(padrao_hifen_meio, corr_hifen_meio, texto_corrigido)
     if novo_texto != texto_corrigido:
-        for m in re.finditer(r"([a-zA-Z]+)[\u2014-]([a-zA-Z]+)", texto_corrigido):
+        for m in re.finditer(padrao_hifen_meio, texto_corrigido):
             correcoes.append(Correcao(
                 tipo="OCR/Hifen", original=m.group(0),
                 corrigido=m.group(1) + "-" + m.group(2).lower(),
@@ -191,11 +194,14 @@ def aplicar_regras_mecanicas(texto):
         return texto_antes + '. ' + travessao
 
     # Procurar: letra/virgula + espaco + travessao (sem ponto antes)
-    novo_texto = re.sub(r"([a-zA-Z,])[ \t]+([\u2014-])", corr_ponto_antes_travessao, texto_corrigido)
+    padrao_ponto_antes_travessao = rf"({LETRA_UNICODE}|,)[ \t]+([\u2014-])"
+    novo_texto = re.sub(padrao_ponto_antes_travessao, corr_ponto_antes_travessao, texto_corrigido)
     if novo_texto != texto_corrigido:
-        for m in re.finditer(r"([a-zA-Z,])[ \t]+([\u2014-])", texto_corrigido):
+        for m in re.finditer(padrao_ponto_antes_travessao, texto_corrigido):
             texto_antes = m.group(1)
-            if texto_antes[-1:] not in '.!?"':
+            if (
+                texto_antes[-1:] not in '.!?"'
+            ):
                 correcoes.append(Correcao(
                     tipo="Pontuacao",
                     original=m.group(0),
@@ -210,14 +216,20 @@ def aplicar_regras_mecanicas(texto):
     # 3. REGRA ESPECIAL: REMOVER VIRGULA APOS TRAVESSAO
     # Ex: "—, se ela" -> "— Se ela"
 
-    novo_texto = re.sub(r"[\u2014-][ \t]*,[ \t]*([a-zA-Z])", lambda m: chr(8212) + " " + m.group(1).upper(), texto_corrigido)
+    def corr_travessao_virgula(match):
+        letra = match.group(1)
+        return chr(8212) + " " + letra.upper()
+
+    padrao_travessao_virgula = rf"(?<!{LETRA_UNICODE})[\u2014-][ \t]*,[ \t]*({LETRA_UNICODE})"
+    novo_texto = re.sub(padrao_travessao_virgula, corr_travessao_virgula, texto_corrigido)
     if novo_texto != texto_corrigido:
-        for m in re.finditer(r"[\u2014-][ \t]*,[ \t]*([a-zA-Z])", texto_corrigido):
+        for m in re.finditer(padrao_travessao_virgula, texto_corrigido):
             letra = m.group(1)
+            corrigido = corr_travessao_virgula(m)
             correcoes.append(Correcao(
                 tipo="Pontuacao",
                 original=m.group(0),
-                corrigido=chr(8212) + " " + letra.upper(),
+                corrigido=corrigido,
                 inicio=m.start(),
                 fim=m.end(),
                 explicacao="Remover virgula apos travessao, maiuscula",
@@ -226,41 +238,24 @@ def aplicar_regras_mecanicas(texto):
     texto_corrigido = novo_texto
 
     # 4. TRAVESSAO INTELIGENTE (contexto)
-    # Se travessao apos: . ! ? " -> maiuscula (inicio de fala)
-    # Se travessao apos: letra minuscula -> minuscula (continuacao)
+    # Sempre normaliza travessao de fala e capitaliza a primeira letra seguinte.
 
     def corr_travessao_inteligente(match):
-        pos = match.start()
         depois = match.group(1)
-        if pos > 0:
-            char_antes = texto_corrigido[pos-1:pos]
-            if char_antes in '.!?"':
-                return chr(8212) + " " + depois.upper()
-            if char_antes.islower():
-                return chr(8212) + " " + depois.lower()
         return chr(8212) + " " + depois.upper()
 
-    novo_texto = re.sub(r"[\u2014-][ \t]*([a-zA-Z])", corr_travessao_inteligente, texto_corrigido)
+    padrao_travessao_letra = rf"(?<!{LETRA_UNICODE})[\u2014-][ \t]*({LETRA_UNICODE})"
+    novo_texto = re.sub(padrao_travessao_letra, corr_travessao_inteligente, texto_corrigido)
     if novo_texto != texto_corrigido:
-        for m in re.finditer(r"[\u2014-][ \t]*([a-zA-Z])", texto_corrigido):
+        for m in re.finditer(padrao_travessao_letra, texto_corrigido):
             letra = m.group(1)
             pos = m.start()
-            if pos > 0:
-                char_antes = texto_corrigido[pos-1:pos]
-                if char_antes in '.!?"':
-                    continue  # Já está correto (início de fala)
-                if char_antes.islower():
-                    correcoes.append(Correcao(
-                        tipo="Pontuacao", original=m.group(0),
-                        corrigido=chr(8212) + " " + letra.lower(),
-                        inicio=m.start(), fim=m.end(),
-                        explicacao="Travessao no meio da frase: minuscula (continuacao)",
-                        cor=COLOR_MECANICA
-                    ))
-                    continue
+            corrigido = corr_travessao_inteligente(m)
+            if m.group(0) == corrigido:
+                continue
             correcoes.append(Correcao(
                 tipo="Pontuacao", original=m.group(0),
-                corrigido=chr(8212) + " " + letra.upper(),
+                corrigido=corrigido,
                 inicio=m.start(), fim=m.end(),
                 explicacao="Maiuscula apos travessao (inicio de fala)",
                 cor=COLOR_MECANICA
@@ -271,9 +266,10 @@ def aplicar_regras_mecanicas(texto):
     def corr_ponto(match):
         letra = match.group(1)
         return ". " + letra.upper()
-    novo_texto = re.sub(r"\.[ \t]*([a-zA-Z])", corr_ponto, texto_corrigido)
+    padrao_ponto_letra = rf"\.[ \t]*({LETRA_UNICODE})"
+    novo_texto = re.sub(padrao_ponto_letra, corr_ponto, texto_corrigido)
     if novo_texto != texto_corrigido:
-        for m in re.finditer(r"\.[ \t]*([a-zA-Z])", texto_corrigido):
+        for m in re.finditer(padrao_ponto_letra, texto_corrigido):
             letra = m.group(1)
             if letra.islower():
                 correcoes.append(Correcao(
@@ -285,11 +281,12 @@ def aplicar_regras_mecanicas(texto):
     texto_corrigido = novo_texto
 
     # 6. VIRGULA SEM ESPACO
-    novo_texto = re.sub(r",[ \t]*(?=[^\s\r\n])", ", ", texto_corrigido)
+    padrao_virgula_sem_espaco = r",(?![ \t]|\d)(?=[^\s\r\n])|,[ \t]{2,}(?!\d)(?=[^\s\r\n])"
+    novo_texto = re.sub(padrao_virgula_sem_espaco, ", ", texto_corrigido)
     if novo_texto != texto_corrigido:
-        for m in re.finditer(r",(?! )", texto_corrigido):
+        for m in re.finditer(padrao_virgula_sem_espaco, texto_corrigido):
             correcoes.append(Correcao(
-                tipo="Pontuacao", original=",", corrigido=", ",
+                tipo="Pontuacao", original=m.group(0), corrigido=", ",
                 inicio=m.start(), fim=m.end(),
                 explicacao="Espaco apos virgula", cor=COLOR_MECANICA
             ))
@@ -321,9 +318,10 @@ def aplicar_regras_mecanicas(texto):
     def corr_interrog(match):
         letra = match.group(1)
         return "? " + letra.upper()
-    novo_texto = re.sub(r"\?[ \t]*([a-zA-Z])", corr_interrog, texto_corrigido)
+    padrao_interrog_letra = rf"\?[ \t]*({LETRA_UNICODE})"
+    novo_texto = re.sub(padrao_interrog_letra, corr_interrog, texto_corrigido)
     if novo_texto != texto_corrigido:
-        for m in re.finditer(r"\?[ \t]*([a-zA-Z])", texto_corrigido):
+        for m in re.finditer(padrao_interrog_letra, texto_corrigido):
             letra = m.group(1)
             if letra.islower():
                 correcoes.append(Correcao(
@@ -336,9 +334,10 @@ def aplicar_regras_mecanicas(texto):
     def corr_exclam(match):
         letra = match.group(1)
         return "! " + letra.upper()
-    novo_texto = re.sub(r"![ \t]*([a-zA-Z])", corr_exclam, texto_corrigido)
+    padrao_exclam_letra = rf"![ \t]*({LETRA_UNICODE})"
+    novo_texto = re.sub(padrao_exclam_letra, corr_exclam, texto_corrigido)
     if novo_texto != texto_corrigido:
-        for m in re.finditer(r"![ \t]*([a-zA-Z])", texto_corrigido):
+        for m in re.finditer(padrao_exclam_letra, texto_corrigido):
             letra = m.group(1)
             if letra.islower():
                 correcoes.append(Correcao(
@@ -355,9 +354,10 @@ def aplicar_regras_mecanicas(texto):
             return "... " + letra.upper()
         return "..."
 
-    novo_texto = re.sub(r"…[ \t]*([a-zA-Z])?", corr_reticencias_unicode, texto_corrigido)
+    padrao_reticencias_unicode = rf"\u2026[ \t]*({LETRA_UNICODE})?"
+    novo_texto = re.sub(padrao_reticencias_unicode, corr_reticencias_unicode, texto_corrigido)
     if novo_texto != texto_corrigido:
-        for m in re.finditer(r"…[ \t]*([a-zA-Z])?", texto_corrigido):
+        for m in re.finditer(padrao_reticencias_unicode, texto_corrigido):
             letra = m.group(1)
             correcoes.append(Correcao(
                 tipo="Pontuacao",
@@ -375,9 +375,10 @@ def aplicar_regras_mecanicas(texto):
             return "... " + letra.upper()
         return "..."
 
-    novo_texto = re.sub(r"\.\.\.[ \t]*([a-zA-Z])?", corr_tres_pontos, texto_corrigido)
+    padrao_tres_pontos = rf"\.\.\.[ \t]*({LETRA_UNICODE})?"
+    novo_texto = re.sub(padrao_tres_pontos, corr_tres_pontos, texto_corrigido)
     if novo_texto != texto_corrigido:
-        for m in re.finditer(r"\.\.\.[ \t]*([a-zA-Z])?", texto_corrigido):
+        for m in re.finditer(padrao_tres_pontos, texto_corrigido):
             letra = m.group(1)
             correcoes.append(Correcao(
                 tipo="Pontuacao", original=m.group(0),
@@ -412,7 +413,15 @@ def aplicar_regras_mecanicas(texto):
     texto_corrigido = novo_texto
 
     # 12. ASPAS RETAS → CURVAS
-    novo_texto = texto_corrigido.replace('"', chr(8220)).replace('"', chr(8221))
+    aspas_abertura = True
+    chars = []
+    for char in texto_corrigido:
+        if char == '"':
+            chars.append(chr(8220) if aspas_abertura else chr(8221))
+            aspas_abertura = not aspas_abertura
+        else:
+            chars.append(char)
+    novo_texto = "".join(chars)
     if novo_texto != texto_corrigido:
         correcoes.append(Correcao(
             tipo="Tipografia", original="Aspas retas", corrigido="Aspas curvas",
@@ -463,9 +472,10 @@ def aplicar_regras_mecanicas(texto):
     texto_corrigido = novo_texto
 
     # 17. ESPACO APOS FECHA-PARENTESES
-    novo_texto = re.sub(r"\)([a-zA-Z])", r") \1", texto_corrigido)
+    padrao_fecha_parenteses = rf"\)({LETRA_UNICODE})"
+    novo_texto = re.sub(padrao_fecha_parenteses, r") \1", texto_corrigido)
     if novo_texto != texto_corrigido:
-        for m in re.finditer(r"\)([a-zA-Z])", texto_corrigido):
+        for m in re.finditer(padrao_fecha_parenteses, texto_corrigido):
             correcoes.append(Correcao(
                 tipo="Pontuacao", original=m.group(0), corrigido=") " + m.group(1),
                 inicio=m.start(), fim=m.end(),
@@ -483,7 +493,8 @@ def aplicar_regras_mecanicas(texto):
         texto_corrigido = novo_texto
 
     # 19. OCR: NUMEROS NO MEIO DE PALAVRAS
-    for m in re.finditer(r"[a-zA-Z]+[0-9]+[a-zA-Z]*|[a-zA-Z]*[0-9]+[a-zA-Z]+", texto_corrigido):
+    padrao_ocr_numero_palavra = rf"{LETRA_UNICODE}+[0-9]+{LETRA_UNICODE}*|{LETRA_UNICODE}*[0-9]+{LETRA_UNICODE}+"
+    for m in re.finditer(padrao_ocr_numero_palavra, texto_corrigido):
         palavra = m.group(0)
         sugestoes = {"0": "o", "1": "l", "3": "e", "5": "s", "8": "b"}
         sugestao = palavra
@@ -509,7 +520,7 @@ def aplicar_regras_contexto(texto, manter_girias=True):
 
     # MAIS vs MAS (contexto de contraste)
     mais_mas = [
-        (r'\bmais[ \t]+(eu|ele|ela|nós|vocês|eles|elas|você|ninguém|alguém|todo\w*)\b', r'mas \1', '"mais" -> "mas" (contraste)'),
+        (r'\bmais[ \t]+(eu|ele|ela|nós|vocês|eles|elas|você)\b', r'mas \1', '"mais" -> "mas" (contraste)'),
         (r'\bmais[ \t]+(não|sim|quando|depois|antes|agora|logo|então|ainda|também|só|já|sempre|nunca|talvez)\b', r'mas \1', '"mais" -> "mas" (contraste)'),
     ]
     for pattern, replacement, explicacao in mais_mas:
@@ -633,15 +644,17 @@ def gerar_html_comparativo(original, corrigido, correcoes):
     pos_atual = 0
     for corr in correcoes_ordenadas:
         if corr.inicio > pos_atual:
-            html_parts.append(corrigido[pos_atual:corr.inicio])
+            html_parts.append(html_lib.escape(corrigido[pos_atual:corr.inicio]))
+        titulo = html_lib.escape(corr.tipo + ": " + corr.explicacao, quote=True)
+        texto_marcado = html_lib.escape(corr.corrigido)
         html_parts.append(
             "<mark style=\"background-color: " + corr.cor + "; padding: 1px 2px; border-radius: 2px;\" "
-            "title=\"" + corr.tipo + ": " + corr.explicacao + "\">"
-            + corr.corrigido + "</mark>"
+            "title=\"" + titulo + "\">"
+            + texto_marcado + "</mark>"
         )
         pos_atual = corr.inicio + len(corr.corrigido)
     if pos_atual < len(corrigido):
-        html_parts.append(corrigido[pos_atual:])
+        html_parts.append(html_lib.escape(corrigido[pos_atual:]))
     texto_destacado = "".join(html_parts)
     texto_destacado = texto_destacado.replace("\n", "<br>")
     html = """<!DOCTYPE html>
